@@ -1,5 +1,11 @@
 # UPS::Nut - a class to talk to a UPS via the Network Utility Tools upsd.
-# Author - Kit Peters <kpeters@iname.com>
+# Author - Kit Peters <perl@clownswilleatyou.com>
+
+# ### changelog: made debug messages slightly more descriptive, improved
+# ### changelog: comments in code
+# ### changelog: removed timeleft function.  I may put a new timeleft 
+# ### changelog: function in 0.04, or I may just let people do a request 
+# ### changelog: for the RUNTIME var.
 
 package UPS::Nut;
 use strict;
@@ -7,349 +13,526 @@ use Carp;
 use FileHandle;
 use IO::Socket;
 
+# The following globals dictate whether the accessors and instant-command
+# functions are created.
+# ### changelog: accessor functions for all supported vars added by 
+# ### changelog: Wayne Wylupski
+
+my $EXPAND_VARS = 0;	# UPS vars will have accessor functions created
+my $EXPAND_INSTCMDS = 0;	# Instant commands will have functions created
+
 BEGIN {
     use Exporter ();
     use vars qw ($VERSION @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS);
-    $VERSION     = 0.02; # $Id$
-    @ISA         = qw(Exporter, IO::Socket::INET);
-    @EXPORT      = qw ();
-    @EXPORT_OK   = qw ();
+    $VERSION     = 0.03; # $Id$
+    @ISA         = qw(Exporter IO::Socket::INET);
+    @EXPORT      = qw();
+    @EXPORT_OK   = qw($EXPAND_VARS $EXPAND_INSTCMDS);
     %EXPORT_TAGS = ();
 }
-
-my ($debug, # are we debugging? 
-    $login, # login name to upsd
-    $name, # UPS name in upsd.conf
-    $host, # host running upsd
-    $port, # port that upsd is running on
-    $proto, # tcp or udp
-    $srvsock, # socket for communicating w/ upsd
-    $vars, # variables supported by upsd 
-    $err, # why did it go bang?
-    $timeout, # how impatient are we?
-    $timedout, # did we time out?
-    $master, # do we have MASTER level access?
-    $instcmds, # instant commands supported by UPS
-    $debugout, # where to write debug messages?
-    ); # global, because I'm lazy.  :)
 
 sub new {
   my $proto = shift;
   my $class = ref($proto) || $proto;
   my %arg = @_; # hash of arguments
-  my $self = \%arg; 
+  my $self = {};	# _initialize will fill it later
   bless $self, $class;
-  unless ($self->_initialize(%arg)) {
-    carp "Can't initialize: $err";
+  unless ($self->_initialize(%arg)) { # can't initialize
+    carp "Can't initialize: $self->{err}";
     return undef;
-    }
-  return $self;
   }
+  return $self;
+}
+
+
+
+# accessor functions.  Return a value if successful, return undef 
+# otherwise.
+
+sub BattPercent { # get battery percentage
+  my $self = shift;
+  my $var = "BATTPCT";
+  return $self->Request($var);
+}
+
+sub LoadPercent { # get load percentage
+  my $self = shift;
+  my $var = "LOADPCT"; 
+  return $self->Request($var);
+}
+
+sub LineVoltage { # get line voltage
+  my $self = shift;
+  my $var = "UTILITY";
+  return $self->Request($var);
+}  
+
+sub Status { # get status of UPS
+  my $self = shift;
+  my $var = "STATUS";
+  return $self->Request($var);
+}
+
+sub Temperature { # get the internal temperature of UPS
+  my $self = shift;
+  my $var = "UPSTEMP";
+  return $self->Request($var);
+}
+
+# control functions: they control our relationship to upsd, and send 
+# commands to upsd.
+
+sub Login { # login to upsd, so that it won't shutdown unless we say we're 
+            # ok.  This should only be used if you're actually connected 
+            # to the ups that upsd is monitoring.
+
+# ### changelog: modified login logic a bit.  Now it doesn't check to see 
+# ### changelog: if we got OK, ERR, or something else from upsd.  It 
+# ### changelog: simply checks for a response beginning with OK from upsd.  
+# ### changelog: Anything else is an error.
+  my $self = shift; # myself
+  my $user = shift; # username
+  my $pass = shift; # password
+  my $srvsock = $self->{srvsock};
+  my $errmsg; # error message, sent to _debug and $self->{err}
+  my $ans; # scalar to hold responses from upsd
+
+# only attempt login if username and password given
+  if ((defined $user) && (defined $pass)) {
+
+    print $srvsock "USERNAME $user\n"; # send username
+    $self->_debug("Sent USERNAME $user to upsd.");
+    chomp($ans = <$srvsock>);
+    $self->_debug("Received $ans from upsd.");
+    
+    if ($ans =~ /^OK/) { # username OK, send password
+
+      print $srvsock "PASSWORD $pass\n";
+      $self->_debug("Sent PASSWORD $pass to upsd.");
+      chomp ($ans = <$srvsock>);
+      $self->_debug("Received $ans from upsd.");
+
+      if ($ans =~ /^OK/) { # password OK, attempt to login
+
+        print $srvsock "LOGIN $self->{name}\n"; 
+        $self->_debug("Sent LOGIN $self->{name} to upsd.");
+
+# ### changelog: 8/3/2002 - KP - modified login to send ups name w/LOGIN 
+# ### changelog: command
+
+        chomp ($ans = <$srvsock>); 
+        $self->_debug("Received $ans from upsd.");
+        if ($ans =~ /^OK/) { # Login successful. 
+          $self->_debug("LOGIN successful.");
+          return 1;
+        }
+      } 
+    }
+  }
+  $errmsg = "LOGIN failed.  Last message from upsd: $ans";
+  $self->_debug($errmsg);
+  $self->{err} = $errmsg;
+  return undef; 
+}
+
+sub Logout { # logout of upsd
+  my $self = shift;
+  my $srvsock = $self->{srvsock};
+  if ($self->{srvsock}) { # are we still connected to upsd?
+    print $srvsock ( "LOGOUT\n" );
+    $self->_debug("Sent LOGOUT to upsd");  
+    chomp (my $ans = <$srvsock>);
+    $self->_debug("Received \"$ans\" from upsd");
+    close ($srvsock);
+  }
+}
+
+# internal functions.  These are only used by UPS::Nut internally, so 
+# please don't use them otherwise.  If you really think an internal 
+# function should be externalized, let me know.
 
 sub _initialize { 
   my $self = shift;
   my %arg = @_;
-  $name = $arg{NAME} || 'default'; # UPS name in etc/ups.conf on $host
-  $host = $arg{HOST} || 'localhost'; # Host running master upsd
-  $port = $arg{PORT} || '3493'; # 3493 is IANA assigned port for NUT
-  $proto = $arg{PROTO} || 'tcp'; # use tcp unless user tells us to
-  $timeout = $arg{TIMEOUT} || 30; # timeout
+  my $host = $arg{HOST}     || 'localhost'; # Host running master upsd
+  my $port = $arg{PORT}     || '3493'; # 3493 is IANA assigned port for NUT
+  my $proto = $arg{PROTO}   || 'tcp'; # use tcp unless user tells us to
   my $user = $arg{USERNAME} || undef; # username passed to upsd
   my $pass = $arg{PASSWORD} || undef; # password passed to upsd
-  $debug = $arg{DEBUG} || 0; # debugging?
-  $debugout = $arg{DEBUGOUT} || undef; # where to send debug messages
-  $timedout = 0; # did we time out?  Set it to 0 initially.
-  $login = 0; # set login to 0 initially.
-  $master = 0; # no master access unless upsd says we have it.
-  $srvsock = IO::Socket::INET->new(PeerAddr => $host, # connect to server
-                                   PeerPort => $port,
-                                   Proto    => $proto);
+  my $login = $arg{LOGIN}   || 0; # login to upsd on init?
+
+  $self->{name} = $arg{NAME} || 'default'; # UPS name in etc/ups.conf on $host
+  $self->{timeout} = $arg{TIMEOUT} || 30; # timeout
+  $self->{debug} = $arg{DEBUG} || 0; # debugging?
+  $self->{debugout} = $arg{DEBUGOUT} || undef; # where to send debug messages
+
+  my $srvsock = $self->{srvsock} = # establish connection to upsd
+    IO::Socket::INET->new(
+      PeerAddr => $host, 
+      PeerPort => $port,
+      Proto    => $proto
+    );
+
   my $ans; # response from upsd to various and sundry commands.  This gets 
            # reused a lot, but I don't think it's getting clobbered 
            # unnecessarily.  
 
-  if (!$srvsock) {
-    $err = "Unable to connect via $proto to $host:$port: $!"; 
+  if (!$self->{srvsock}) { # can't connect
+    $self->{err} = "Unable to connect via $proto to $host:$port: $!"; 
     return undef;
+  }
+
+  if ($login) { # attempt login to upsd if that option is specified
+    if ($self->Login($user, $pass)) { 
+      $self->_debug("Logged in successfully to upsd");
     }
-
-# The login logic is just unholy here.  Can I clean this up somehow?
-  if ((defined $user) && (defined $pass)) { #1
-    _debug("Attempting login to upsd.");
-    print $srvsock "USERNAME $user\n";
-    chomp($ans = <$srvsock>);
-    _debug("Received $ans from upsd.");
-    if ($ans =~ /^ERR/) { #2
-      _debug("Login error: upsd reports $ans");
-      $login = 0;
-      } #2end
-    elsif ($ans =~ /^OK/) { #3
-      print $srvsock "PASSWORD $pass\n";
-      chomp ($ans = <$srvsock>);
-
-      if ($ans =~ /^ERR/) { #4
-        _debug("Login error: upsd reports $ans");
-        $login = 0;
-        } #4end
-      elsif ($ans =~ /^OK/) { #5
-        print $srvsock "LOGIN\n";
-        chomp ($ans = <$srvsock>);        
-
-        if ($ans =~ /^ERR/) { #6
-          _debug("Login error: upsd reports $ans");
-          $login = 0;
-          } #6end
-        elsif ($ans =~ /^OK/) { #7
-          _debug("LOGIN successful.  Response: $ans");
-          $login = 1; # login successful!
-          } #7end
-        else { #8
-          _debug("Sent LOGIN to upsd, received $ans");
-          $login = 0;
-          } #8end
-        } #5end
-      else { #9
-        _debug("Sent PASSWORD to upsd, received $ans");
-        $login = 0;
-        } #9end
-      } #3end
-    else { #10
-       _debug("Sent USERNAME to upsd, received $ans");
-       $login = 0;
-       } #10end
-    unless ($login) {
-      $err = "Login error: $ans, login functions disabled";
-      carp $err;
-      }
-    } #1end
-
-# get list of supported vars once, so we know what we can and 
-# can't do.
-
-   $vars = ListVars();
-  } 
- 
-sub BattPercent() {
-  my $var = "BATTPCT";
-  return Request($var);
-  }
-
-sub LoadPercent() {
-  my $var = "LOADPCT"; 
-  return Request($var);
-  }
-
-sub LineVoltage() {
-  my $var = "UTILITY";
-  return Request($var);
-  }  
-
-sub Status() {
-  my $var = "STATUS";
-  return Request($var);
-  }
-
-sub Temperature() {
-  my $var = "UPSTEMP";
-  return Request($var);
-  }
-
-sub Logout() {
-  if ($srvsock) {
-    _debug("Sent LOGOUT to upsd");  
-    print $srvsock "LOGOUT\n";
-    chomp (my $ans = <$srvsock>);
-    _debug("Received \"$ans\" from upsd");
-    close ($srvsock);
+    else { 
+      $self->_debug("Login to upsd failed: $self->{err}");
+      carp "Login to upsd failed: $self->{err}";
     }
   }
 
-sub _timeleft() {
-  # Unless the load is at or very near 25% or 50%, this isn't accurate.  
-  # According to Cyberpower, at 50% load, the battery will last 
-  # approximately 40 minutes at full charge.  at 25% load, the 
-  # battery will last approximately 100 minutes at full charge.  At loads 
-  # higher than 50%, I'm told that the bettery life decreases 
-  # "exponentially."  So I drew a line, connecting the two points, which 
-  # is described by the function Battery life (minutes) = (-2.4 * Load 
-  # Percentage) + 160.  The accuracy will improve as I get more data 
-  # points. THIS IS ONLY VALID FOR CYBERPOWER 1250AVR
+  $self->{vars} = $self->ListVars();  # get list of supported vars once,
+                                  # so we know what we can and can't do.
 
-  if (Request("MFR") =~ /cyberpower/i) {
-    warn "This data only valid for Cyberpower 1250AVR"; 
-    my $load = Request("LOADPCT");  
-    my $batt = Request("BATTPCT");
-    my $timeleft = (-2.4 * $load) + 160;
-    if ($timeleft < 0) {
-      return 0;
-      }
-    else { return $timeleft; }
-    }
+  if ( $arg{EXPAND_VARS} || $UPS::Nut::EXPAND_VARS ) {
+    $self->_expand_vars(); # create accessor functions for vars
   }
-sub Request() {
+
+  if ( $arg{EXPAND_INSTCMDS} || $UPS::Nut::EXPAND_INSTCMDS ) {
+    $self->_expand_instcmds(); # create accessor functions for instcmds
+  }
+
+  return 1; # initialization successful.
+}
+
+sub _expand_vars
+{
+# The following builds VARS accesser routines.
+# This uses closures:  modified from Wall, et al: PROGRAMMING PERL 3rd Edition
+# ### changelog: accessor functions for all supported vars added by Wayne 
+# ### changelog: Wylupski
+
+    my $self = shift;
+    my @vars = split( / /, $self->{vars} );
+    my $dummy;
+
+# Wayne had some error checking code here, but the code duplicated that 
+# in ListVars, so I've removed it. - KP - 8/4/2002
+
+# not having "@<upsname>" in LISTVARS is acceptable behavior.  Removed 
+# that section of Wayne's code that checked for "@<upsname>" - KP - 
+# 8/4/2002
+
+    if ($vars[0] =~ m/@/ ) { shift @vars } # throw away $vars[0] if it's
+                                           # of the form "@<upsname>"
+
+    for my $field ( @vars )
+    {
+        no strict "refs";
+        *$field = sub {
+            my $self = shift;
+            if ( @_ )
+            {
+                return $self->Set( $field, shift );
+            }
+            else
+            {
+                return $self->Request( $field );
+            }
+        }
+    }
+}
+
+# ### changelog: Added functions to directly call all supported instant 
+# ### commands.  Added by Wayne Wylupski 
+sub _expand_instcmds
+{
+    my $self = shift;
+    my $instcmdstring = $self->ListInstCmds(); # get it in a string for debug
+    my @instcmds = split / /, $instcmdstring;
+
+# Wayne had error checking code here that was duplicated in 
+# ListInstCmds().  Removed that section of his code.  KP - 8/4/2002
+
+    for my $field ( @instcmds )
+    {
+        no strict "refs";
+        *$field = sub {
+            my $self = shift;
+            $self->InstCmd($field);
+        }
+    }
+}
+
+sub Request { # request a variable from the UPS
+  my $self = shift;
+  my $srvsock = $self->{srvsock};
+# ### changelog: 8/3/2002 - KP - Request() now returns undef if not
+# ### changelog: connected to upsd via $srvsock 
+  unless ($srvsock) {
+    $self->{err} = "Not connected to upsd!";
+    return undef;
+  }
 # work on error handling
   my $var = shift;
-  unless ($vars =~ /$var/i) {
-    $err = "Variable $var not supported by UPS $name\n";  
+  unless ($self->{vars} =~ /$var/i) {
+    $self->{err} = "Variable $var not supported by UPS $self->{name}\n";  
     return undef;
-    }
-
-  my $req = "REQ $var@" . $name;
-  my $null; # place to stick unwanted parts of a split()
-
-  print $srvsock "$req\n";
-  _debug("sending request \"$req\"");
-  my $ans;
-  $SIG{'ALRM'} = \&_alarmhandler;
-  alarm($timeout);
-  if ($timedout) { 
-    $err = "Connection timed out after $timeout secs.";
-    return undef;
-    } 
-  chomp ($ans = <$srvsock>);
-  alarm(0);
-  _debug("received answer \"$ans\"");
-  if ($ans =~ /^ERR/) {
-    $err = "Error: $ans";
-    return undef;
-    }
-  elsif ($ans =~ /^ANS/) {
-    my $checkvar; # to make sure the var we asked for is the var we got.
-    my $retval; # return value
-    ($null, $checkvar, $retval) = split ' ', $ans, 3;
-    ($checkvar, $null) = split /@/, $checkvar, 2;
-    if ($checkvar ne $var) { # is "$ans =~ /$var/" more efficient?
-      $err = "requested $var, received $checkvar";
-      return undef;  
-      }
-    return $retval;
-    }
-  else {
-    $err = "Unrecognized response from upsd: $ans";
-    return undef;
-    }
-  }   
-
-sub FSD {
-   my $req = "FSD " . $name;
-   print $srvsock "$req\n";
-   _debug ("Sent \"$req\" to upsd.");
-   chomp (my $ans = <$srvsock>);
-   _debug ("Received \"$ans\" from upsd.");
-   if ($ans =~ /^ERR/) {
-     $err = "Can't set FSD flag.  Upsd reports: $ans";
-     return undef;
-     }
-   elsif ($ans =~ /^OK FSD-SET/) {
-     _debug("FSD flag set successfully.");
-     return 1;
-     }
-   else {
-     $err = "Unrecognized response from upsd: $ans";
-     return undef;
-     }
-   }
-
-sub InstCmd {
-   chomp (my $cmd = shift);
-   unless ($instcmds =~ /$cmd/i) {
-     $err = "Instant command $cmd not supported by UPS $name.";
-     return undef;
-     }
-   my $req = "INSTCMD" . $cmd . "@" . $name;
-   $err = "Can't send instant command " . $cmd . ". Reason: ";
-   print $srvsock "$req\n";
-   chomp (my $ans = <$srvsock>);
-   if ($ans =~ /^ERR/) {
-     $err .= $ans;
-     return undef;
-     }
-   elsif ($ans =~ /^OK/) {
-     _debug("Instant command $cmd sent successfully.");
-     return 1;
-     }
-   else {
-     $err .= "Unrecognized response from upsd: $ans";
-     return undef;
-     }
-   }
-
-sub DESTROY {
-  my $self = shift;
-  _debug("Object destroyed.");
-  $self->Logout();
   }
 
+  my $req = "REQ $var@" . $self->{name}; # build request
+  my $null; # place to stick unwanted parts of a split()
+
+  print $srvsock "$req\n"; # send request
+  $self->_debug("sent request for $var \"$req\"");
+  my $ans;
+  eval { # this sets up the timeout for response from upsd
+      local $SIG{'ALRM'} = sub { die "alarm clock reset" };
+      alarm($self->{timeout});
+      chomp ($ans = <$srvsock>);
+      alarm(0);
+  };
+  alarm(0);
+  if ($@ && $@ !~ /alarm clock reset/ ) # timed out
+  # ### added by Wayne Wylupski
+  {
+      $self->{err} = "Connection timed out after $self->{timeout} secs.";
+      return undef;
+  };
+  $self->_debug("received answer \"$ans\"");
+  if ($ans =~ /^ERR/) {
+    $self->{err} = "Error: $ans.  Requested $var.";
+    return undef;
+  }
+  elsif ($ans =~ /^ANS/) {
+    my $checkvar; # to make sure the var we asked for is the var we got.
+    my $retval; # returned value for requested VAR
+    ($null, $checkvar, $retval) = split ' ', $ans, 3; 
+        # get checkvar and retval from the answer
+    ($checkvar, $null) = split /@/, $checkvar, 2; # throw away "@<upsname>"
+    if ($checkvar ne $var) { # did not get expected var
+      $self->{err} = "requested $var, received $checkvar";
+      return undef;  
+    }
+    return $retval; # return the requested value
+  }
+  else { # unrecognized response
+    $self->{err} = "Unrecognized response from upsd: $ans";
+    return undef;
+  }
+}   
+
+sub Set() {
+  my $self = shift;
+  my $srvsock = $self->{srvsock};
+# work on error handling
+  my $var = shift;
+  my $value = shift;
+  unless ($self->{vars} =~ /$var/i) {
+    $self->{err} = "Variable $var not supported by UPS $self->{name}\n";  
+    return undef;
+  }
+
+  my $req = "SET $var@" . $self->{name} . " " . $value; # build request
+  my $null; # place to stick unwanted parts of a split()
+
+  print $srvsock "$req\n"; # send request
+  $self->_debug("sending request \"$req\"");
+  my $ans;
+  eval { # timeout timer
+      local $SIG{'ALRM'} = sub { die "alarm clock reset" };
+      alarm($self->{timeout});
+      chomp ($ans = <$srvsock>);
+      alarm(0);
+  };
+  alarm(0);
+  if ($@ && $@ !~ /alarm clock reset/ ) # timed out
+  {
+      $self->{err} = "Connection timed out after $self->{timeout} secs.";
+      return undef;
+  };
+  $self->_debug("received answer \"$ans\"");
+  if ($ans =~ /^ERR/) {
+    $self->{err} = "Error: $ans";
+    return undef;
+  }
+  elsif ($ans =~ /^ANS/) {
+# this only checks to see if we got the var we asked for.  modify this to 
+# check to see if we got the requested value for the var.
+    my $checkvar; # to make sure the var we asked for is the var we got.
+    my $retval; # return value
+    ($null, $checkvar, $retval) = split ' ', $ans, 3; # get var and value
+    ($checkvar, $null) = split /@/, $checkvar, 2; # throw away "@<upsname>"
+    if ($checkvar ne $var) { # did not get the var we asked for
+      $self->{err} = "requested $var, received $checkvar";
+      return undef;  
+    }
+    if ($retval ne $value) {
+      $self->{err} = "Requested to set $var to $value, but $var set to$retval";    
+      return undef;
+    }
+    return $retval; # for compatibility with earlier versions of Nut.pm
+  }
+  else { # unrecognized response
+    $self->{err} = "Unrecognized response from upsd: $ans";
+    return undef;
+  }
+}   
+
+sub FSD { # set forced shutdown flag
+  my $self = shift;
+  my $srvsock = $self->{srvsock};
+
+  my $req = "FSD " . $self->{name}; # build request
+  print $srvsock "$req\n"; # send request
+  $self->_debug ("Sent \"$req\" to upsd.");
+  chomp (my $ans = <$srvsock>);
+  $self->_debug ("Received \"$ans\" from upsd.");
+  if ($ans =~ /^ERR/) { # can't set forced shutdown flag
+    $self->{err} = "Can't set FSD flag.  Upsd reports: $ans";
+    return undef;
+  }
+  elsif ($ans =~ /^OK FSD-SET/) { # forced shutdown flag set
+    $self->_debug("FSD flag set successfully.");
+    return 1;
+  }
+  else {
+    $self->{err} = "Unrecognized response from upsd: $ans";
+    return undef;
+  }
+}
+
+sub InstCmd { # send instant command to ups
+  my $self = shift;
+  my $srvsock = $self->{srvsock};
+
+  chomp (my $cmd = shift);
+  unless ($self->{instcmds} =~ /$cmd/i) { # is the command supported
+    $self->{err} = "Instant command $cmd not supported by UPS$self->{name}.";
+    return undef;
+  }
+  my $req = "INSTCMD" . $cmd . "@" . $self->{name};
+  print $srvsock "$req\n"; # send instant command
+  chomp (my $ans = <$srvsock>);
+  if ($ans =~ /^ERR/) { # error reported from upsd
+    $self->{err} = "Can't send instant command $cmd. Reason: $ans";
+    return undef;
+  }
+  elsif ($ans =~ /^OK/) { # command successful
+    $self->_debug("Instant command $cmd sent successfully.");
+    return 1;
+  }
+  else { # unrecognized response
+    $self->{err} = "Can't send instant command $cmd. Unrecognized response from upsd: $ans";
+    return undef;
+  }
+}
+
+sub DESTROY { # destructor, all it does is call Logout
+  my $self = shift;
+  $self->_debug("Object destroyed.");
+  $self->Logout();
+}
+
 sub _debug { # print debug messages to stdout or file
-  if ($debug) {
+  my $self = shift;
+  if ($self->{debug}) {
     chomp (my $msg = shift);
-    my $out;
-    if ($debugout) {
-      $out = new FileHandle ($debugout, ">>") or warn "Error: $!";
-      } 
-    if ($out) {
+    my $out; # filehandle for output
+    if ($self->{debugout}) { # if filename is given, use that
+      $out = new FileHandle ($self->{debugout}, ">>") or warn "Error: $!";
+    } 
+    if ($out) { # if out was set to a filehandle, create nifty timestamp
       my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime();
       $year = sprintf("%02d", $year % 100); # Y2.1K compliant, even!
       my $timestamp = join '/', ($mon + 1), $mday, $year; # today
       $timestamp .= " ";
       $timestamp .= join ':', $hour, $min, $sec;
       print $out "$timestamp $msg\n";
-      }
-    else { print "DEBUG: $msg\n"; }
     }
+    else { print "DEBUG: $msg\n"; } # otherwise, print to stdout
   }
+}
 
-sub _alarmhandler { $timedout = 1 };
-
-sub Error { 
-  if ($err) { return $err; }
+sub Error { # what was the last thing that went bang?
+  my $self = shift;
+  if ($self->{err}) { return $self->{err}; }
   else { return "No error explanation available."; }
-  }
+}
 
 sub ListVars { # get list of supported variables
-  my $req = "LISTVARS " . $name;
+  my $self = shift;
+  my $srvsock = $self->{srvsock};
+
+  my $req = "LISTVARS " . $self->{name}; # build request
+  my $availvars; # available variables
+  print $srvsock "$req\n";
+  $self->_debug("Sent \"$req\" to upsd");
+  chomp ($availvars = <$srvsock>);
+  $self->_debug("Received \"$availvars\" from upsd.");
+  unless ($availvars =~ /^VARS/) {
+    $self->{err} = "Can't get var list.  Upsd response: $availvars";
+    return undef;
+  }
+  return $availvars;
+}
+
+sub ListRW { # get list of supported read/writeable variables
+  my $self = shift;
+  my $srvsock = $self->{srvsock};
+
+  my $req = "LISTRW " . $self->{name};
   my $availvars;
-  _debug("Sending \"$req\" to upsd");
+  $self->_debug("Sending \"$req\" to upsd");
   print $srvsock "$req\n";
   chomp ($availvars = <$srvsock>);
-  _debug("Received \"$availvars\" from upsd.");
-  unless ($availvars =~ /^VARS/) {
-    $err = "Can't get var list.  Upsd response: $availvars";
+  $self->_debug("Received \"$availvars\" from upsd.");
+  unless ($availvars =~ /^RW/) {
+    $self->{err} = "Can't get var list.  Upsd response: $availvars";
     return undef;
-    }
-  return $availvars;
   }
+  return $availvars;
+}
 
 sub Master { # check for MASTER level access
-  my $req = "MASTER " . $name;
-  _debug ("Sending \"$req\" to upsd.");
-  print $srvsock "$req\n";
+  my $self = shift;
+  my $srvsock = $self->{srvsock}; # socket for communicating w/ upsd
+
+  my $req = "MASTER " . $self->{name}; # build request
+  $self->_debug ("Sending \"$req\" to upsd.");
+  print $srvsock "$req\n"; # send request
   chomp (my $ans = <$srvsock>);
-  _debug ("Received \"$ans\" from upsd.");
-  if ($ans =~ /^OK/) {
-    _debug("MASTER level access granted.  Upsd reports: $ans");
+  $self->_debug ("Received \"$ans\" from upsd.");
+  if ($ans =~ /^OK/) { # access granted
+    $self->_debug("MASTER level access granted.  Upsd reports: $ans");
     return 1;
-    }
-  else {
-    $err = "Upsd responded: $ans";
-    return 0;
-    }
   }
+  else { # access denied, or unrecognized reponse
+    $self->{err} = "MASTER level access denied.  Upsd responded: $ans";
+# ### changelog: 8/3/2002 - KP - Master() returns undef rather than 0 on 
+# ### failure.  this makes it consistent with other methods
+    return undef;
+  }
+}
 
 sub ListInstCmds { # check for available instant commands
-  my $req = "LISTINSTCMD " . $name;
-  _debug("Sending \"$req\" to upsd.");
-  print $srvsock "$req\n";
+  my $self = shift;
+  my $srvsock = $self->{srvsock}; # socket for communicating w/ upsd
+
+  my $req = "LISTINSTCMD " . $self->{name}; # build request
+  $self->_debug("Sending \"$req\" to upsd.");
+  print $srvsock "$req\n"; # send request
   chomp (my $ans = <$srvsock>);
-  _debug("Received \"$ans\" from upsd.");
-  if ($ans =~ /^INSTCMDS/) {
+  $self->_debug("Received \"$ans\" from upsd.");
+  if ($ans =~ /^INSTCMDS/) { # got instant command list
     return $ans;
-    }
-  else {
-    $err = "Upsd responded: $ans";
-    return undef;
-    }
   }
+  else { # error, or unrecognized response
+    $self->{err} = "Upsd responded: $ans";
+    return undef;
+  }
+}
 
 =head1 NAME
 
@@ -365,25 +548,21 @@ Nut - a module to talk to a UPS via NUT (Network UPS Tools) upsd
                       USERNAME => "upsuser",
                       PASSWORD => "upspasswd",
                       TIMEOUT => 30,
-                      DEBUG => 0,
-                      DEBUGOUT => "/some/file/somewhere");
+                      DEBUG => 1,
+                      DEBUGOUT => "/some/file/somewhere",
+                      EXPAND_VARS => 1,
+                      EXPAND_INSTCMDS => 1,
+                    );
  if ($ups->Status() =~ /OB/) {
     print "Oh, no!  Power failure!\n";
-    }
+ }
 
 =head1 DESCRIPTION
 
 This is an object-oriented (whoo!) interface between Perl and upsd from 
-the Network UPS Tools package (http://www.exploits.org/nut/).  It only 
-does the things that it can do talking to upsd.  It won't monitor your UPS 
-continually - you'll have to write something that does that, like:
-
-for (;;) {
-  if ($ups->Status() =~ /OB/) { 
-    # Ack!  There's a power failure!  Sure wish I had written some code to 
-    # deal with that situation...
-    }
-  }
+the Network UPS Tools package (http://www.exploits.org/nut/).  Note that 
+it only talks to upsd for you in a Perl-ish way.  It doesn't continually 
+monitor the UPS.
 
 =head1 CONSTRUCTOR
 
@@ -393,41 +572,61 @@ Shown with defaults: new UPS::Nut( NAME => "default",
                                    USERNAME => "", 
                                    PASSWORD => "", 
                                    DEBUG => 0, 
-                                   DEBUGOUT => "");
+                                   DEBUGOUT => "",
+                                   EXPAND_VARS => 0,
+                                   EXPAND_INSTCMDS => 0,
+                                 );
 * NAME is the name of the UPS to monitor, as specified in ups.conf
 * HOST is the host running upsd
 * PORT is the port that upsd is running on
-* USERNAME and PASSWORD are those specified in upsd.conf.  If these aren't 
-  specified, then you will only have access to the level of privileges in 
-  upsd.conf that do not require a password.  This is configured in 
-  upsd.conf. 
-* DEBUG turns on debugging output
+* USERNAME and PASSWORD are those that you use to login to upsd.  This 
+  gives you the right to do certain things, as specified in upsd.conf.
+* DEBUG turns on debugging output, set to 1 or 0
 * DEBUGOUT is de thing you do when the s*** hits the fan.  Actually, it's 
   the filename where you want debugging output to go.  If it's not 
-  specified, debugging output comes to STDOUT. 
+  specified, debugging output comes to standard output.
+* EXPAND_VARS automatically creates accessor functions for all
+  the UPS variables.  For instance, $ups->MFR and $ups->UPSIDENT( "my UPS" );
+  would end up being legitimate calls.  Set to 1 or 0
+* EXPAND_INSTCMDS automatically creates functions for the instant
+  commands.  For instance $ups->SHUTDOWN would be a legitimate call.  You
+  would still need the proper permissions to run the command.  Set to 1 or 
+  0
 
 =head1 Methods
 
 =head2 Methods for querying UPS status
  
-Query(varname)
-  returns value of the specified variable, if supported
+Request(varname)
+  returns value of the specified variable.  Returns undef if variable 
+  unsupported.
+
+Set(varname, value)
+  sets the value of the specified variable.  Returns undef if variable 
+  unsupported, or if variable cannot be set for some other reason.
 
 BattPercent()
-  returns % of battery left
+  returns percentage of battery left.  Returns undef if we can't get 
+  battery percentage for some reason.
 
 LoadPercent()
-  returns % of load, the UPS' available capacity
+  returns percentage of the load on the UPS.  Returns undef if load 
+  percentage is unavailable.
 
 LineVoltage()
-  returns line voltage, useful if your UPS doesn't do voltage regulation.
+  returns input line (e.g. the outlet) voltage.  Returns undef if line 
+  voltage is unavailable.
 
 Status()
-  returns status, one of "OL," "OB," or "LB," which are online (power OK), 
-  on battery (power failure), or low battery, respectively.
+  returns UPS status, one of OL or OB.  OL or OB may be followed by LB, 
+  which signifies low battery state.  OL or OB may also be followed by 
+  FSD, which denotes that the forced shutdown state 
+  ( see UPS::Nut->FSD() ) has been set on upsd.  Returns undef if status 
+  unavailable.  
 
 Temperature()
-  returns UPS temperature
+  returns UPS internal temperature.  Returns undef if internal temperature 
+  unavailable.
 
 =head2 Other methods
 
@@ -439,32 +638,31 @@ Master()
   UPS. Returns 1 if we have MASTER privileges, returns 0 otherwise.
 
 ListVars()
-  Returns a list of all variables supported by the UPS.
+  Returns a list of all read-only variables supported by the UPS.  Returns 
+  undef if these are unavailable.
+
+ListRW()
+  Returns a list of all read/writeable variables supported by the UPS.  
+  Returns undef if these are unavailable.
 
 ListInstCmds()
-  Returns a list of all instant commands supported by the UPS.
+  Returns a list of all instant commands supported by the UPS.  Returns 
+  undef if these are unavailable.  
 
 InstCmd (command)
-  Send an instant command to the UPS.  Returns undef if the command can't 
-  be completed for whatever reason, otherwise returns 1.
+  Send an instant command to the UPS.  Returns 1 on success.  Returns 
+  undef if the command can't be completed.
 
 FSD()
   Set the FSD (forced shutdown) flag for the UPS.  This means that we're 
   planning on shutting down the UPS very soon, so the attached load should 
-  be shut down as well.  Returns 1 on success, returns undef on failure 
-  for any reason.  This cannot be unset, so don't set it unless you mean 
-  it.
+  be shut down as well.  Returns 1 on success, returns undef on failure. 
+  This cannot be unset, so don't set it unless you mean it.
 
 Error()
   why did the previous operation fail?  The answer is here.  It will 
   return a concise, well-written, and brilliantly insightful few words as 
-  to why whatever you just did went bang.  I promise that this method will 
-  never return "Error: This module doesn't like you.  Go away."
-
-TimeLeft()
-  at current load, how much time before battery is depleted.  This isn't 
-  very accurate at loads other than 25% and 50%, (the data points that I 
-  got from CyberPower Systems) but it will give you a number.
+  to why whatever you just did went bang.  
 
 =head1 Unimplemented commands to UPSD
 
@@ -473,24 +671,12 @@ TimeLeft()
   the Nut distribution, under the docs/ subdirectory)  to see what these 
   commands do.
 
-  SET ENUM VARDESC LISTRW VARTYPE INSTCMDDESC 
-
-=head1 Notes
-
-  Unless the load is at or very near 25% or 50%, this isn't accurate.  
-  According to Cyberpower, at 50% load, the battery will last 
-  approximately 40 minutes at full charge.  at 25% load, the 
-  battery will last approximately 100 minutes at full charge.  At loads 
-  higher than 50%, I'm told that the bettery life decreases 
-  "exponentially."  So I drew a line, connecting the two points, which 
-  is described by the function Battery life (minutes) = (-2.4 * Load 
-  Percentage) + 160.  The accuracy will improve as I get more data 
-  points.
+  ENUM VARDESC VARTYPE INSTCMDDESC 
 
 =head1 AUTHOR
 
   Kit Peters 
-  kpeters@iname.com
+  perl@clownswilleatyou.com
   http://www.awod.com/staff/kpeters/perl/
 
 =head1 CREDITS
@@ -501,6 +687,9 @@ Developed with the kind support of A World Of Difference, Inc.
 Many thanks to Ryan Jessen <rjessen@cyberpowersystems.com> at CyberPower 
 Systems for much-needed assistance.
 
+Thanks to Wayne Wylupski <wayne@connact.com> for the code to make 
+accessor methods for all supported vars. 
+
 =head1 LICENSE
 
 This module is distributed under the same license as Perl itself.
@@ -509,3 +698,4 @@ This module is distributed under the same license as Perl itself.
 
 1;
 __END__
+

@@ -10,7 +10,7 @@ use IO::Socket;
 BEGIN {
     use Exporter ();
     use vars qw ($VERSION @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS);
-    $VERSION     = 0.01; # $Id$
+    $VERSION     = 0.02; # $Id$
     @ISA         = qw(Exporter, IO::Socket::INET);
     @EXPORT      = qw ();
     @EXPORT_OK   = qw ();
@@ -51,7 +51,7 @@ sub _initialize {
   my %arg = @_;
   $name = $arg{NAME} || 'default'; # UPS name in etc/ups.conf on $host
   $host = $arg{HOST} || 'localhost'; # Host running master upsd
-  $port = $arg{PORT} || '3305'; # 3305 is default port for upsd
+  $port = $arg{PORT} || '3493'; # 3493 is IANA assigned port for NUT
   $proto = $arg{PROTO} || 'tcp'; # use tcp unless user tells us to
   $timeout = $arg{TIMEOUT} || 30; # timeout
   my $user = $arg{USERNAME} || undef; # username passed to upsd
@@ -361,7 +361,7 @@ Nut - a module to talk to a UPS via NUT (Network UPS Tools) upsd
 
  $ups = new UPS::Nut( NAME => "myups",
                       HOST => "somemachine.somewhere.com",
-                      PORT => "3305",
+                      PORT => "3493",
                       USERNAME => "upsuser",
                       PASSWORD => "upspasswd",
                       TIMEOUT => 30,
@@ -389,7 +389,7 @@ for (;;) {
 
 Shown with defaults: new UPS::Nut( NAME => "default", 
                                    HOST => "localhost", 
-                                   PORT => "3305", 
+                                   PORT => "3493", 
                                    USERNAME => "", 
                                    PASSWORD => "", 
                                    DEBUG => 0, 

@@ -53,3 +53,17 @@ Revision history for Perl extension UPS::Nut.
           All references to _debug() have been replaced with 
           $self->_debug().  This improves compatibility with Perl 5.005 
           and 'use strict'
+
+0.04  Sat Nov 30 10:17:27 2002
+
+          From Wayne:
+
+          AUTOLOAD for InstCmds;
+          Removed EXPANDed stuff
+          Added attributions for the specific routines
+          Adjusted the POD for the above changes
+
+          From me:
+  
+          Changed $version to read 0.04.  Oh boy.  *grin*
+

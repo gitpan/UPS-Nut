@@ -1,7 +1,10 @@
-This is version 0.1 of UPS::Nut, a module to monitor a UPS via upsd, part 
+This is version 0.4 of UPS::Nut, a module to monitor a UPS via upsd, part 
 of the Network UPS Tools package, available from 
 http://www.exploits.org/nut/.  It's the first Perl module I've ever 
 written, so please let me know if I've screwed something up.  :)
+
+This README may be kinda out of date.  Check the POD for what to do with 
+this.
 
 NAME
     Nut - a module to talk to a UPS via NUT (Network UPS Tools) upsd
@@ -101,10 +104,14 @@ Unimplemented commands to UPSD
 
 AUTHOR
       Kit Peters 
-      kpeters@iname.com
-      http://www.awod.com/staff/kpeters/perl/
+      perl@clownswilleatyou.com
+      http://www.clownswilleatyou.com/perl/
 
 CREDITS
+    Many kind thanks go to Wayne Wylupski <wayne@connact.com>, for adding 
+    major functionality.  Go check out his LCD UPS thing!  
+    http://www.webbastards.com/projects/
+
     Developed with the kind support of A World Of Difference, Inc.
     <http://www.awod.com/>
 

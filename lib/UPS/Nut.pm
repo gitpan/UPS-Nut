@@ -3,35 +3,34 @@
 
 # ### changelog: made debug messages slightly more descriptive, improved
 # ### changelog: comments in code
-# ### changelog: removed timeleft function.  I may put a new timeleft 
-# ### changelog: function in 0.04, or I may just let people do a request 
-# ### changelog: for the RUNTIME var.
+# ### changelog: Removed timeleft() function.  
 
 package UPS::Nut;
 use strict;
 use Carp;
 use FileHandle;
 use IO::Socket;
+use IO::Select;
 
 # The following globals dictate whether the accessors and instant-command
 # functions are created.
-# ### changelog: accessor functions for all supported vars added by 
+# ### changelog: tie hash interface and AUTOLOAD contributed by
 # ### changelog: Wayne Wylupski
 
-my $EXPAND_VARS = 0;	# UPS vars will have accessor functions created
-my $EXPAND_INSTCMDS = 0;	# Instant commands will have functions created
+my $_eol = "\n";
 
 BEGIN {
     use Exporter ();
     use vars qw ($VERSION @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS);
-    $VERSION     = 0.03; # $Id$
+    $VERSION     = 0.04; # $Id$
     @ISA         = qw(Exporter IO::Socket::INET);
     @EXPORT      = qw();
-    @EXPORT_OK   = qw($EXPAND_VARS $EXPAND_INSTCMDS);
+    @EXPORT_OK   = qw();
     %EXPORT_TAGS = ();
 }
 
 sub new {
+# Author: Kit Peters
   my $proto = shift;
   my $class = ref($proto) || $proto;
   my %arg = @_; # hash of arguments
@@ -44,36 +43,39 @@ sub new {
   return $self;
 }
 
-
-
 # accessor functions.  Return a value if successful, return undef 
 # otherwise.
 
 sub BattPercent { # get battery percentage
+# Author: Kit Peters
   my $self = shift;
   my $var = "BATTPCT";
   return $self->Request($var);
 }
 
 sub LoadPercent { # get load percentage
+# Author: Kit Peters
   my $self = shift;
   my $var = "LOADPCT"; 
   return $self->Request($var);
 }
 
 sub LineVoltage { # get line voltage
+# Author: Kit Peters
   my $self = shift;
   my $var = "UTILITY";
   return $self->Request($var);
 }  
 
 sub Status { # get status of UPS
+# Author: Kit Peters
   my $self = shift;
   my $var = "STATUS";
   return $self->Request($var);
 }
 
 sub Temperature { # get the internal temperature of UPS
+# Author: Kit Peters
   my $self = shift;
   my $var = "UPSTEMP";
   return $self->Request($var);
@@ -86,64 +88,97 @@ sub Login { # login to upsd, so that it won't shutdown unless we say we're
             # ok.  This should only be used if you're actually connected 
             # to the ups that upsd is monitoring.
 
+# Author: Kit Peters
 # ### changelog: modified login logic a bit.  Now it doesn't check to see 
 # ### changelog: if we got OK, ERR, or something else from upsd.  It 
 # ### changelog: simply checks for a response beginning with OK from upsd.  
 # ### changelog: Anything else is an error.
+#
+# ### changelog: uses the new _send command
+#
   my $self = shift; # myself
   my $user = shift; # username
   my $pass = shift; # password
-  my $srvsock = $self->{srvsock};
   my $errmsg; # error message, sent to _debug and $self->{err}
   my $ans; # scalar to hold responses from upsd
 
 # only attempt login if username and password given
   if ((defined $user) && (defined $pass)) {
 
-    print $srvsock "USERNAME $user\n"; # send username
-    $self->_debug("Sent USERNAME $user to upsd.");
-    chomp($ans = <$srvsock>);
-    $self->_debug("Received $ans from upsd.");
-    
-    if ($ans =~ /^OK/) { # username OK, send password
+    $ans = $self->_send( "USERNAME $user");
+    if (defined $ans && $ans =~ /^OK/) { # username OK, send password
 
-      print $srvsock "PASSWORD $pass\n";
-      $self->_debug("Sent PASSWORD $pass to upsd.");
-      chomp ($ans = <$srvsock>);
-      $self->_debug("Received $ans from upsd.");
+      $ans = $self->_send( "PASSWORD $pass");
+      if (defined $ans && $ans =~ /^OK/) { # password OK, attempt to login
 
-      if ($ans =~ /^OK/) { # password OK, attempt to login
-
-        print $srvsock "LOGIN $self->{name}\n"; 
-        $self->_debug("Sent LOGIN $self->{name} to upsd.");
+        $ans = $self->_send( "LOGIN $self->{name}" );
 
 # ### changelog: 8/3/2002 - KP - modified login to send ups name w/LOGIN 
 # ### changelog: command
 
-        chomp ($ans = <$srvsock>); 
-        $self->_debug("Received $ans from upsd.");
-        if ($ans =~ /^OK/) { # Login successful. 
+        if (defined $ans && $ans =~ /^OK/) { # Login successful. 
           $self->_debug("LOGIN successful.");
           return 1;
         }
       } 
     }
   }
-  $errmsg = "LOGIN failed.  Last message from upsd: $ans";
+  if ( defined $ans )
+  {
+      $errmsg = "LOGIN failed.  Last message from upsd: $ans";
+  }
+  else
+  {
+      $errmsg = "Network error: $!";
+  }
+  $self->_debug($errmsg);
+  $self->{err} = $errmsg;
+  return undef; 
+}
+
+sub Authenticate { # Announce to the UPS who we are to set up the proper 
+                   # management level.  See upsd.conf man page for details.
+
+# Contributor: Wayne Wylupski
+  my $self = shift; # myself
+  my $user = shift; # username
+  my $pass = shift; # password
+
+  my $errmsg; # error message, sent to _debug and $self->{err}
+  my $ans; # scalar to hold responses from upsd
+
+  # only attempt authentication if username and password given
+  if ((defined $user) && (defined $pass)) {
+
+    $ans = $self->_send( "USERNAME $user");
+    if (defined $ans && $ans =~ /^OK/) { # username OK, send password
+
+      $ans = $self->_send( "PASSWORD $pass");
+      return 1 if (defined $ans && $ans =~ /^OK/);
+    }
+  }
+  if ( defined $ans )
+  {
+      $errmsg = "Authentication failed.  Last message from upsd: $ans";
+  }
+  else
+  {
+      $errmsg = "Network error: $!";
+  }
   $self->_debug($errmsg);
   $self->{err} = $errmsg;
   return undef; 
 }
 
 sub Logout { # logout of upsd
+# Author: Kit Peters
+# ### changelog: uses the new _send command
+#
   my $self = shift;
-  my $srvsock = $self->{srvsock};
   if ($self->{srvsock}) { # are we still connected to upsd?
-    print $srvsock ( "LOGOUT\n" );
-    $self->_debug("Sent LOGOUT to upsd");  
-    chomp (my $ans = <$srvsock>);
-    $self->_debug("Received \"$ans\" from upsd");
-    close ($srvsock);
+    my $ans = $self->_send( "LOGOUT" );
+    close ($self->{srvsock});
+    delete ($self->{srvsock});
   }
 }
 
@@ -152,6 +187,7 @@ sub Logout { # logout of upsd
 # function should be externalized, let me know.
 
 sub _initialize { 
+# Author: Kit Peters
   my $self = shift;
   my %arg = @_;
   my $host = $arg{HOST}     || 'localhost'; # Host running master upsd
@@ -173,14 +209,12 @@ sub _initialize {
       Proto    => $proto
     );
 
-  my $ans; # response from upsd to various and sundry commands.  This gets 
-           # reused a lot, but I don't think it's getting clobbered 
-           # unnecessarily.  
-
-  if (!$self->{srvsock}) { # can't connect
+  unless ( defined $srvsock) { # can't connect
     $self->{err} = "Unable to connect via $proto to $host:$port: $!"; 
     return undef;
   }
+
+  $self->{select} = IO::Select->new( $srvsock );
 
   if ($login) { # attempt login to upsd if that option is specified
     if ($self->Login($user, $pass)) { 
@@ -192,115 +226,84 @@ sub _initialize {
     }
   }
 
-  $self->{vars} = $self->ListVars();  # get list of supported vars once,
-                                  # so we know what we can and can't do.
+  # get a hash of vars for both the TIE functions as well as for 
+  # expanding vars.
+  %{$self->{vars}} = map{ $_ =>1 } $self->ListVars;
 
-  if ( $arg{EXPAND_VARS} || $UPS::Nut::EXPAND_VARS ) {
-    $self->_expand_vars(); # create accessor functions for vars
+  unless ( defined $self->{vars} ) {
+    $self->{err} = "Network error: $!";
+    return undef;
   }
 
-  if ( $arg{EXPAND_INSTCMDS} || $UPS::Nut::EXPAND_INSTCMDS ) {
-    $self->_expand_instcmds(); # create accessor functions for instcmds
-  }
-
-  return 1; # initialization successful.
+  return $self;
 }
 
-sub _expand_vars
+# 
+# _send
+#
+# Sends a command to the server and retrieves the results.
+# If there was a network error, return undef; $! will contain the 
+# error.
+sub _send
 {
-# The following builds VARS accesser routines.
-# This uses closures:  modified from Wall, et al: PROGRAMMING PERL 3rd Edition
-# ### changelog: accessor functions for all supported vars added by Wayne 
-# ### changelog: Wylupski
-
+# Contributor: Wayne Wylupski
     my $self = shift;
-    my @vars = split( / /, $self->{vars} );
-    my $dummy;
+    my $cmd = shift;
+    my @handles;
+    my $result;		# undef by default
 
-# Wayne had some error checking code here, but the code duplicated that 
-# in ListVars, so I've removed it. - KP - 8/4/2002
+    my $socket = $self->{srvsock};
+    my $select = $self->{select};
 
-# not having "@<upsname>" in LISTVARS is acceptable behavior.  Removed 
-# that section of Wayne's code that checked for "@<upsname>" - KP - 
-# 8/4/2002
+    @handles = IO::Select->select( undef, $select, $select, $self->{timeout} );
+    return undef if ( !scalar $handles[1] );
 
-    if ($vars[0] =~ m/@/ ) { shift @vars } # throw away $vars[0] if it's
-                                           # of the form "@<upsname>"
+    $socket->print( $cmd . $_eol );
 
-    for my $field ( @vars )
-    {
-        no strict "refs";
-        *$field = sub {
-            my $self = shift;
-            if ( @_ )
-            {
-                return $self->Set( $field, shift );
-            }
-            else
-            {
-                return $self->Request( $field );
-            }
-        }
-    }
+    @handles = IO::Select->select( $select, undef, $select, $self->{timeout} );
+    return undef if ( !scalar  $handles[0]);
+    
+    $result = $socket->getline;
+    return undef if ( !defined ( $result ) );
+    chomp $result;
+
+    return $result;
 }
 
-# ### changelog: Added functions to directly call all supported instant 
-# ### commands.  Added by Wayne Wylupski 
-sub _expand_instcmds
+sub _getline
 {
+# Contributor: Wayne Wylupski
     my $self = shift;
-    my $instcmdstring = $self->ListInstCmds(); # get it in a string for debug
-    my @instcmds = split / /, $instcmdstring;
+    my $result;		# undef by default
 
-# Wayne had error checking code here that was duplicated in 
-# ListInstCmds().  Removed that section of his code.  KP - 8/4/2002
+    my $socket = $self->{srvsock};
+    my $select = $self->{select};
 
-    for my $field ( @instcmds )
-    {
-        no strict "refs";
-        *$field = sub {
-            my $self = shift;
-            $self->InstCmd($field);
-        }
-    }
+    # Different versions of IO::Socket has different error detection routines.
+    return undef if ( $IO::Socket::{has_error} && $select->has_error(0) );
+    return undef if ( $IO::Socket::{has_exception} && $select->has_exception(0) );
+
+    chomp ( $result = $socket->getline );
+    return $result;
 }
 
 sub Request { # request a variable from the UPS
+# Author: Kit Peters
   my $self = shift;
-  my $srvsock = $self->{srvsock};
 # ### changelog: 8/3/2002 - KP - Request() now returns undef if not
 # ### changelog: connected to upsd via $srvsock 
-  unless ($srvsock) {
-    $self->{err} = "Not connected to upsd!";
-    return undef;
-  }
-# work on error handling
+# ### changelog: uses the new _send command
+#
   my $var = shift;
-  unless ($self->{vars} =~ /$var/i) {
-    $self->{err} = "Variable $var not supported by UPS $self->{name}\n";  
-    return undef;
-  }
-
   my $req = "REQ $var@" . $self->{name}; # build request
-  my $null; # place to stick unwanted parts of a split()
+  my $ans = $self->_send( $req );
 
-  print $srvsock "$req\n"; # send request
-  $self->_debug("sent request for $var \"$req\"");
-  my $ans;
-  eval { # this sets up the timeout for response from upsd
-      local $SIG{'ALRM'} = sub { die "alarm clock reset" };
-      alarm($self->{timeout});
-      chomp ($ans = <$srvsock>);
-      alarm(0);
-  };
-  alarm(0);
-  if ($@ && $@ !~ /alarm clock reset/ ) # timed out
-  # ### added by Wayne Wylupski
+  unless ( defined $ans )
   {
-      $self->{err} = "Connection timed out after $self->{timeout} secs.";
+      $self->{err} = "Network error: $!";
       return undef;
   };
-  $self->_debug("received answer \"$ans\"");
+
   if ($ans =~ /^ERR/) {
     $self->{err} = "Error: $ans.  Requested $var.";
     return undef;
@@ -308,9 +311,9 @@ sub Request { # request a variable from the UPS
   elsif ($ans =~ /^ANS/) {
     my $checkvar; # to make sure the var we asked for is the var we got.
     my $retval; # returned value for requested VAR
-    ($null, $checkvar, $retval) = split ' ', $ans, 3; 
+    (undef, $checkvar, $retval) = split ' ', $ans, 3; 
         # get checkvar and retval from the answer
-    ($checkvar, $null) = split /@/, $checkvar, 2; # throw away "@<upsname>"
+    ($checkvar, undef) = split /@/, $checkvar, 2; # throw away "@<upsname>"
     if ($checkvar ne $var) { # did not get expected var
       $self->{err} = "requested $var, received $checkvar";
       return undef;  
@@ -323,56 +326,71 @@ sub Request { # request a variable from the UPS
   }
 }   
 
-sub Set() {
+sub ListRequest { # request variables in the form Name => Value
+# Author: Kit Peters
+# ### changelog: uses the new _send command
+#
   my $self = shift;
-  my $srvsock = $self->{srvsock};
-# work on error handling
+  my @result = ();
+
+  foreach my $var ( @_ )
+  {
+      my $req = "REQ $var@" . $self->{name}; # build request
+      my $ans = $self->_send( $req );
+
+      unless ( defined $ans )
+      {
+          $self->{err} = "Network error: $!";
+          return ();
+      };
+
+      if ($ans =~ /^ERR/) {
+        $self->{err} = "Error: $ans.  Requested $var.";
+        return ();
+      }
+      elsif ($ans =~ /^ANS/) {
+        my $checkvar; # to make sure the var we asked for is the var we got.
+        my $retval; # returned value for requested VAR
+        (undef, $checkvar, $retval) = split ' ', $ans, 3; 
+            # get checkvar and retval from the answer
+        ($checkvar, undef) = split /@/, $checkvar, 2; # throw away "@<upsname>"
+        if ($checkvar ne $var) { # did not get expected var
+          $self->{err} = "requested $var, received $checkvar";
+          return ();  
+        }
+        push @result, $var, $retval;
+      }
+      else { # unrecognized response
+        $self->{err} = "Unrecognized response from upsd: $ans";
+        return ();
+      }
+  }
+  return @result;
+}   
+
+sub Set {
+# Contributor: Wayne Wylupski
+# ### changelog: uses the new _send command
+#
+  my $self = shift;
   my $var = shift;
   my $value = shift;
-  unless ($self->{vars} =~ /$var/i) {
-    $self->{err} = "Variable $var not supported by UPS $self->{name}\n";  
-    return undef;
-  }
 
   my $req = "SET $var@" . $self->{name} . " " . $value; # build request
-  my $null; # place to stick unwanted parts of a split()
+  my $ans = $self->_send( $req );
 
-  print $srvsock "$req\n"; # send request
-  $self->_debug("sending request \"$req\"");
-  my $ans;
-  eval { # timeout timer
-      local $SIG{'ALRM'} = sub { die "alarm clock reset" };
-      alarm($self->{timeout});
-      chomp ($ans = <$srvsock>);
-      alarm(0);
-  };
-  alarm(0);
-  if ($@ && $@ !~ /alarm clock reset/ ) # timed out
+  unless ( defined $ans )
   {
-      $self->{err} = "Connection timed out after $self->{timeout} secs.";
+      $self->{err} = "Network error: $!";
       return undef;
   };
-  $self->_debug("received answer \"$ans\"");
+
   if ($ans =~ /^ERR/) {
     $self->{err} = "Error: $ans";
     return undef;
   }
-  elsif ($ans =~ /^ANS/) {
-# this only checks to see if we got the var we asked for.  modify this to 
-# check to see if we got the requested value for the var.
-    my $checkvar; # to make sure the var we asked for is the var we got.
-    my $retval; # return value
-    ($null, $checkvar, $retval) = split ' ', $ans, 3; # get var and value
-    ($checkvar, $null) = split /@/, $checkvar, 2; # throw away "@<upsname>"
-    if ($checkvar ne $var) { # did not get the var we asked for
-      $self->{err} = "requested $var, received $checkvar";
-      return undef;  
-    }
-    if ($retval ne $value) {
-      $self->{err} = "Requested to set $var to $value, but $var set to$retval";    
-      return undef;
-    }
-    return $retval; # for compatibility with earlier versions of Nut.pm
+  elsif ($ans =~ /^OK/) {
+    return $value;
   }
   else { # unrecognized response
     $self->{err} = "Unrecognized response from upsd: $ans";
@@ -381,14 +399,20 @@ sub Set() {
 }   
 
 sub FSD { # set forced shutdown flag
+# Author: Kit Peters
+# ### changelog: uses the new _send command
+#
   my $self = shift;
-  my $srvsock = $self->{srvsock};
 
   my $req = "FSD " . $self->{name}; # build request
-  print $srvsock "$req\n"; # send request
-  $self->_debug ("Sent \"$req\" to upsd.");
-  chomp (my $ans = <$srvsock>);
-  $self->_debug ("Received \"$ans\" from upsd.");
+  my $ans = $self->_send( $req );
+
+  unless ( defined $ans )
+  {
+      $self->{err} = "Network error: $!";
+      return undef;
+  };
+
   if ($ans =~ /^ERR/) { # can't set forced shutdown flag
     $self->{err} = "Can't set FSD flag.  Upsd reports: $ans";
     return undef;
@@ -404,17 +428,20 @@ sub FSD { # set forced shutdown flag
 }
 
 sub InstCmd { # send instant command to ups
+# Contributor: Wayne Wylupski
   my $self = shift;
-  my $srvsock = $self->{srvsock};
 
   chomp (my $cmd = shift);
-  unless ($self->{instcmds} =~ /$cmd/i) { # is the command supported
-    $self->{err} = "Instant command $cmd not supported by UPS$self->{name}.";
-    return undef;
-  }
-  my $req = "INSTCMD" . $cmd . "@" . $self->{name};
-  print $srvsock "$req\n"; # send instant command
-  chomp (my $ans = <$srvsock>);
+
+  my $req = "INSTCMD " . $cmd . "@" . $self->{name};
+  my $ans = $self->_send( $req );
+
+  unless ( defined $ans )
+  {
+      $self->{err} = "Network error: $!";
+      return undef;
+  };
+
   if ($ans =~ /^ERR/) { # error reported from upsd
     $self->{err} = "Can't send instant command $cmd. Reason: $ans";
     return undef;
@@ -429,13 +456,142 @@ sub InstCmd { # send instant command to ups
   }
 }
 
+sub Enum
+{
+# Contributor: Wayne Wylupski
+    my $self = shift;
+    my $var = shift;
+
+    my $req = "ENUM " . $var . "@" . $self->{name};
+    my $ans = $self->_send( $req );
+
+    unless ( defined $ans )
+    {
+        $self->{err} = "Network error: $!";
+        return undef;
+    };
+
+    if ($ans =~ /^ERR/) {
+      $self->{err} = "Error: $ans";
+      return undef;
+    }
+    elsif ($ans =~ /^ENUM /) { # command successfulQ
+      my ( $line, $option, $selected );
+      my @results;
+      while ( $line = $self->_getline )
+      {
+          if (($option, undef, $selected) = ( $line =~ /^OPTION (".*")( )?(SELECTED)?$/ ))
+          {
+              push @results, [ $option, $selected ];
+          }
+          last if ( $line =~ /^END/ );
+      }
+      $self->_debug("$req command sent successfully.");
+      return @results;
+    }
+    else { # unrecognized response
+      $self->{err} = "Can't send $req. Unrecognized response from upsd: $ans";
+      return undef;
+    }
+}
+
+sub VarDesc
+{
+# Contributor: Wayne Wylupski
+    my $self = shift;
+    my $var = shift;
+
+#   my $req = "VARDESC " . $var . "@" . $self->{name}; # NOT LIKE OTHER COMMANDS
+    my $req = "VARDESC " . $var ;
+    my $ans = $self->_send( $req );
+    unless ( defined $ans )
+    {
+        $self->{err} = "Network error: $!";
+        return undef;
+    };
+
+    if ($ans =~ /^ERR/) {
+      $self->{err} = "Error: $ans";
+      return undef;
+    }
+    elsif ($ans =~ /^DESC/) { # command successful
+      $self->_debug("$req command sent successfully.");
+      ( undef, $ans ) = split ' ', $ans, 2;
+      return $ans;
+    }
+    else { # unrecognized response
+      $self->{err} = "Can't send $req. Unrecognized response from upsd: $ans";
+      return undef;
+    }
+}
+
+sub VarType
+{
+# Contributor: Wayne Wylupski
+    my $self = shift;
+    my $var = shift;
+
+    my $req = "VARTYPE " . $var . "@" . $self->{name};
+    my $ans = $self->_send( $req );
+    unless ( defined $ans )
+    {
+        $self->{err} = "Network error: $!";
+        return undef;
+    };
+
+    if ($ans =~ /^ERR/) {
+      $self->{err} = "Error: $ans";
+      return undef;
+    }
+    elsif ($ans =~ /^TYPE/) { # command successful
+      $self->_debug("$req command sent successfully.");
+      ( undef, $ans ) = split ' ', $ans, 2;
+      return $ans;
+    }
+    else { # unrecognized response
+      $self->{err} = "Can't send $req. Unrecognized response from upsd: $ans";
+      return undef;
+    }
+}
+
+sub InstCmdDesc 
+{
+# Contributor: Wayne Wylupski
+    my $self = shift;
+    my $cmd = shift;
+
+    my $req = "INSTCMDDESC " . $cmd . "@" . $self->{name};
+    my $ans = $self->_send( $req );
+    unless ( defined $ans )
+    {
+        $self->{err} = "Network error: $!";
+        return undef;
+    };
+
+    if ($ans =~ /^ERR/) {
+      $self->{err} = "Error: $ans";
+      return undef;
+    }
+    elsif ($ans =~ /^DESC/) { # command successful
+      $self->_debug("$req command sent successfully.");
+      ( undef, $ans ) = split ' ', $ans, 2;
+      return $ans;
+    }
+    else { # unrecognized response
+      $self->{err} = "Can't send $req. Unrecognized response from upsd: $ans";
+      return undef;
+    }
+}
+
 sub DESTROY { # destructor, all it does is call Logout
+# Author: Kit Peters
   my $self = shift;
   $self->_debug("Object destroyed.");
   $self->Logout();
 }
 
 sub _debug { # print debug messages to stdout or file
+# Author: Kit Peters
   my $self = shift;
   if ($self->{debug}) {
     chomp (my $msg = shift);
@@ -456,54 +612,111 @@ sub _debug { # print debug messages to stdout or file
 }
 
 sub Error { # what was the last thing that went bang?
+# Author: Kit Peters
   my $self = shift;
   if ($self->{err}) { return $self->{err}; }
   else { return "No error explanation available."; }
 }
 
 sub ListVars { # get list of supported variables
+# Author: Kit Peters
+# ### changelog: uses the new _send command
+#
   my $self = shift;
-  my $srvsock = $self->{srvsock};
 
   my $req = "LISTVARS " . $self->{name}; # build request
-  my $availvars; # available variables
-  print $srvsock "$req\n";
-  $self->_debug("Sent \"$req\" to upsd");
-  chomp ($availvars = <$srvsock>);
-  $self->_debug("Received \"$availvars\" from upsd.");
-  unless ($availvars =~ /^VARS/) {
+  my $availvars = $self->_send( $req );
+
+  unless ( defined $availvars )
+  {
+      $self->{err} = "Network error: $!";
+      return undef;
+  };
+
+  my @vars = split( / /, $availvars );
+
+  unless ( ( shift @vars ) =~ /^VARS/ ) {
     $self->{err} = "Can't get var list.  Upsd response: $availvars";
     return undef;
   }
-  return $availvars;
+
+  if ($vars[0] =~ m/@/ ) { shift @vars } # throw away $vars[0] if it's
+                                           # of the form "@<upsname>"
+
+  return @vars;
 }
 
 sub ListRW { # get list of supported read/writeable variables
+# Author: Kit Peters
+# ### changelog: uses the new _send command
+#
   my $self = shift;
-  my $srvsock = $self->{srvsock};
 
   my $req = "LISTRW " . $self->{name};
-  my $availvars;
-  $self->_debug("Sending \"$req\" to upsd");
-  print $srvsock "$req\n";
-  chomp ($availvars = <$srvsock>);
-  $self->_debug("Received \"$availvars\" from upsd.");
-  unless ($availvars =~ /^RW/) {
+  my $availvars = $self->_send( $req );
+
+  unless ( defined $availvars )
+  {
+      $self->{err} = "Network error: $!";
+      return undef;
+  };
+
+  my @vars = split( / /, $availvars );
+
+  unless ( ( shift @vars ) =~ /^RW/ ) {
     $self->{err} = "Can't get var list.  Upsd response: $availvars";
     return undef;
   }
-  return $availvars;
+
+  if ($vars[0] =~ m/@/ ) { shift @vars } # throw away $vars[0] if it's
+                                           # of the form "@<upsname>"
+
+  return @vars;
+}
+
+sub ListInstCmds { # check for available instant commands
+# Contributor: Wayne Wylupski
+# ### changelog: uses the new _send command
+#
+  my $self = shift;
+
+  my $req = "LISTINSTCMD " . $self->{name}; # build request
+  my $instcmds = $self->_send( $req );
+
+  unless ( defined $instcmds )
+  {
+      $self->{err} = "Network error: $!";
+      return undef;
+  };
+
+  my @instcmds = split( / /, $instcmds );
+
+  unless ( ( shift @instcmds ) =~ /^INSTCMDS/ ) {
+    $self->{err} = "Can't get var list.  Upsd response: $instcmds";
+    return undef;
+  }
+
+  if ($instcmds[0] =~ m/@/ ) { shift @instcmds }
+  # throw away $instcmds[0] if it's of the form "@<upsname>"
+
+  return @instcmds;
 }
 
 sub Master { # check for MASTER level access
+# Author: Kit Peters
+# ### changelog: uses the new _send command
+#
   my $self = shift;
-  my $srvsock = $self->{srvsock}; # socket for communicating w/ upsd
 
   my $req = "MASTER " . $self->{name}; # build request
-  $self->_debug ("Sending \"$req\" to upsd.");
-  print $srvsock "$req\n"; # send request
-  chomp (my $ans = <$srvsock>);
-  $self->_debug ("Received \"$ans\" from upsd.");
+  my $ans = $self->_send( $req );
+
+  unless ( defined $ans )
+  {
+      $self->{err} = "Network error: $!";
+      return undef;
+  };
+
   if ($ans =~ /^OK/) { # access granted
     $self->_debug("MASTER level access granted.  Upsd reports: $ans");
     return 1;
@@ -516,22 +729,87 @@ sub Master { # check for MASTER level access
   }
 }
 
-sub ListInstCmds { # check for available instant commands
-  my $self = shift;
-  my $srvsock = $self->{srvsock}; # socket for communicating w/ upsd
+sub AUTOLOAD {
+# Contributor: Wayne Wylupski
+    my $self = shift;
+    my $name = $UPS::Nut::AUTOLOAD;
+    $name =~ s/^.*:://;
 
-  my $req = "LISTINSTCMD " . $self->{name}; # build request
-  $self->_debug("Sending \"$req\" to upsd.");
-  print $srvsock "$req\n"; # send request
-  chomp (my $ans = <$srvsock>);
-  $self->_debug("Received \"$ans\" from upsd.");
-  if ($ans =~ /^INSTCMDS/) { # got instant command list
-    return $ans;
-  }
-  else { # error, or unrecognized response
-    $self->{err} = "Upsd responded: $ans";
-    return undef;
-  }
+    # for a change we will only load cmds if needed.
+    if (!defined $self->{cmds} )
+    {
+        %{$self->{cmds}} = map{ $_ =>1 } $self->ListInstCmds;
+    }
+
+    croak "No such InstCmd: $name" if (! $self->{cmds}{$name} );
+    
+    return $self->InstCmd( $name );
+}
+
+#-------------------------------------------------------------------------
+# tie hash interface
+#
+# The variables of the array, including the hidden 'numlogins' can
+# be accessed as a hash array through this method.
+#
+# Example:
+#  tie %ups, 'UPS::Nut',
+#      NAME => "myups",
+#      HOST => "somemachine.somewhere.com",
+#      ... # same options as new();
+#  ;
+#
+#  $ups{UPSIDENT} = "MyUPS";
+#  print $ups{MFR}, " " $ups{MODEL}, "\n";
+#  
+#-------------------------------------------------------------------------
+sub TIEHASH {
+    my $class = shift || 'UPS::Nut';
+    return $class->new( @_ );
+}
+
+sub FETCH {
+    my $self = shift;
+    my $key = shift;
+
+    return $self->Request( $key );
+}
+
+sub STORE {
+    my $self = shift;
+    my $key = shift;
+    my $value = shift;
+
+    return $self->Set( $key, $value );
+}
+
+sub DELETE {
+    croak "DELETE operation not supported";
+}
+
+sub CLEAR {
+    croak "CLEAR operation not supported";
+}
+
+sub EXISTS {
+    my $self = shift;
+    my $key = shift;
+    return exists $self->{vars}{$key};
+}
+
+sub FIRSTKEY {
+    my $self = shift;
+    my $a = keys %{$self->{vars}};
+    return scalar each %{$self->{vars}};
+}
+
+sub NEXTKEY {
+    my $self = shift;
+    return scalar each %{$self->{vars}};
+}
+
+sub UNTIE {
+    $_[0]->Logout;
 }
 
 =head1 NAME
@@ -550,12 +828,18 @@ Nut - a module to talk to a UPS via NUT (Network UPS Tools) upsd
                       TIMEOUT => 30,
                       DEBUG => 1,
                       DEBUGOUT => "/some/file/somewhere",
-                      EXPAND_VARS => 1,
-                      EXPAND_INSTCMDS => 1,
                     );
  if ($ups->Status() =~ /OB/) {
     print "Oh, no!  Power failure!\n";
  }
+
+ tie %other_ups, 'UPS::Nut',
+     NAME => "myups",
+     HOST => "somemachine.somewhere.com",
+     ... # same options as new();
+ ;
+
+ print $other_ups{MFR}, " ", $other_ups{MODEL}, "\n";
 
 =head1 DESCRIPTION
 
@@ -573,8 +857,6 @@ Shown with defaults: new UPS::Nut( NAME => "default",
                                    PASSWORD => "", 
                                    DEBUG => 0, 
                                    DEBUGOUT => "",
-                                   EXPAND_VARS => 0,
-                                   EXPAND_INSTCMDS => 0,
                                  );
 * NAME is the name of the UPS to monitor, as specified in ups.conf
 * HOST is the host running upsd
@@ -582,16 +864,9 @@ Shown with defaults: new UPS::Nut( NAME => "default",
 * USERNAME and PASSWORD are those that you use to login to upsd.  This 
   gives you the right to do certain things, as specified in upsd.conf.
 * DEBUG turns on debugging output, set to 1 or 0
-* DEBUGOUT is de thing you do when the s*** hits the fan.  Actually, it's 
+* DEBUGOUT is de thing you do when de s*** hits the fan.  Actually, it's 
   the filename where you want debugging output to go.  If it's not 
   specified, debugging output comes to standard output.
-* EXPAND_VARS automatically creates accessor functions for all
-  the UPS variables.  For instance, $ups->MFR and $ups->UPSIDENT( "my UPS" );
-  would end up being legitimate calls.  Set to 1 or 0
-* EXPAND_INSTCMDS automatically creates functions for the instant
-  commands.  For instance $ups->SHUTDOWN would be a legitimate call.  You
-  would still need the proper permissions to run the command.  Set to 1 or 
-  0
 
 =head1 Methods
 
@@ -603,7 +878,8 @@ Request(varname)
 
 Set(varname, value)
   sets the value of the specified variable.  Returns undef if variable 
-  unsupported, or if variable cannot be set for some other reason.
+  unsupported, or if variable cannot be set for some other reason.  See
+  Authenticate() if you wish to use this function.
 
 BattPercent()
   returns percentage of battery left.  Returns undef if we can't get 
@@ -632,6 +908,11 @@ Temperature()
 
   These all operate on the UPS specified in the NAME argument to the 
   constructor.
+
+Authenticate( username, password )
+  With NUT certain operations are only available if the user has the 
+  privilege.  The program has to authenticate with one of the accounts
+  defined in upsd.conf.
 
 Master()
   Use this to find out whether or not we have MASTER privileges for this 
@@ -664,14 +945,27 @@ Error()
   return a concise, well-written, and brilliantly insightful few words as 
   to why whatever you just did went bang.  
 
-=head1 Unimplemented commands to UPSD
+=head1 AUTOLOAD
 
-  These are things that are listed in "protocol.txt" in the Nut 
-  distribution that I haven't implemented yet.  Consult "protocol.txt" (in 
-  the Nut distribution, under the docs/ subdirectory)  to see what these 
-  commands do.
+The "instant commands"  are available as methods of the UPS object.  They
+are AUTOLOADed when called.  For example, if the instant command is FPTEST,
+then it can be called by $ups->FPTEST.
 
-  ENUM VARDESC VARTYPE INSTCMDDESC 
+=head1 TIE Interface
+
+  If you wish to simply query or set values, you can tie a hash value to
+  UPS::Nut and pass as extra options what you need to connect to the host.
+  If you need to exercise an occasional command, you may find the return
+  value of 'tie' useful, as in:
+
+  my %ups;
+  my $ups_obj = tie %ups, 'UPS::Nut', HOSTNAME=>"firewall";
+  
+  print $ups{UPSIDENT}, "\n";
+
+  $ups_obj->Authenticate( "user", "pass" );
+
+  $ups{UPSIDENT} = "MyUPS";
 
 =head1 AUTHOR
 
